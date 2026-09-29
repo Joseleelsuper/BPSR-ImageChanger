@@ -21,3 +21,5 @@ powerShell -NoProfile -ExecutionPolicy Bypass -File ".\BPSR-ImageChanger.ps1"
 
 5. Sigue las instrucciones hasta que el script haya terminado de ejecutarse.
 
+> [!Important]
+> Al terminar de importar y guardar la imagen, recuerda poner RESTORE en la terminal para restaurar el fichero original.
