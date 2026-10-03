@@ -69,10 +69,10 @@ Select-Language
 try { $Host.UI.RawUI.WindowTitle = Get-Text 'WindowTitle' } catch { }
 
 function Write-Log {
-    param([string]$Message)
+    param([string]$Message, [string]$Summary = $Message)
     $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     Add-Content -LiteralPath (Join-Path $LogRoot 'BPSR-ImageChanger.log') -Value $line -Encoding UTF8
-    Write-Host "[OK] $Message" -ForegroundColor Green
+    Write-Host "[OK] $Summary" -ForegroundColor Green
 }
 
 function Write-UiHeader {
@@ -409,10 +409,11 @@ function Invoke-Prepare {
     }
     Save-State -State $state
     Write-PkgToolInstructions -Game $game -Backup $backup -Image $image
-    Write-Log (Get-Text 'PrepareLog' @($actual, (Join-Path $WorkRoot 'm92.pkg')))
-    Write-Host (Get-Text 'OriginalCopyVerified' @($backup.Path))
-    Write-Host (Get-Text 'FollowPkgSteps' @((Join-Path $WorkRoot 'PKGcontrol-pasos.txt')))
-    Write-Host (Get-Text 'AfterPkgSteps')
+    Write-Log (Get-Text 'PrepareLog' @($actual, (Join-Path $WorkRoot 'm92.pkg'))) -Summary (Get-Text 'PrepareComplete')
+    if ($Action -ne 'wizard') {
+        Write-Host (Get-Text 'FollowPkgSteps' @((Join-Path $WorkRoot 'PKGcontrol-pasos.txt')))
+        Write-Host (Get-Text 'AfterPkgSteps')
+    }
 }
 
 function Invoke-LaunchPkgControl {
@@ -474,7 +475,7 @@ function Invoke-Install {
     Set-StateProperty -State $state -Name 'LastAppliedUtc' -Value ((Get-Date).ToUniversalTime().ToString('o'))
     Set-StateProperty -State $state -Name 'LastPreInstallBackup' -Value $before
     Save-State -State $state
-    Write-Log (Get-Text 'InstallLog' @($before))
+    Write-Log (Get-Text 'InstallLog' @($before)) -Summary (Get-Text 'InstallHashVerified')
 }
 
 function Invoke-Restore {
@@ -494,6 +495,11 @@ function Invoke-Restore {
     if ((Get-FileHash -LiteralPath $before -Algorithm SHA256).Hash -ne $currentHash) { throw (Get-Text 'PreRestoreBackupMismatch') }
     $temporary = Join-Path $game.Container ('m92.pkg.BPSR-ImageChanger-' + [guid]::NewGuid().ToString('N') + '.tmp')
     Copy-Item -LiteralPath $backup -Destination $temporary
+    $processes = @(Get-Process -Name 'BPSR_STEAM' -ErrorAction SilentlyContinue)
+    if ($processes.Count -gt 0) {
+        Remove-Item -LiteralPath $temporary -Force
+        throw (Get-Text 'GameMustCloseRestore' @($processes.Id -join ', '))
+    }
     Move-Item -LiteralPath $temporary -Destination $game.Package -Force
     if ((Get-FileHash -LiteralPath $game.Package -Algorithm SHA256).Hash -ne $backupHash) { throw (Get-Text 'PostRestoreMismatch') }
     if ($state) {
@@ -501,16 +507,18 @@ function Invoke-Restore {
         Set-StateProperty -State $state -Name 'RestoredUtc' -Value ((Get-Date).ToUniversalTime().ToString('o'))
         Save-State -State $state
     }
-    Write-Log (Get-Text 'RestoreLog' @($before))
+    Write-Log (Get-Text 'RestoreLog' @($before)) -Summary (Get-Text 'RestoredVerified')
 }
 
 function Wait-ForGameClosed {
+    param([switch]$Required)
     while ($true) {
         $game = Get-GameInfo
         if (-not $game.IsRunning) { return $game }
         Write-Host (Get-Text 'WaitForGame' @($game.ProcessIds -join ', '))
-        $answer = Read-Host (Get-Text 'WaitForGamePrompt')
-        if ($answer.Trim() -match '^(x|cancelar|cancel|annuler)$') { throw (Get-Text 'ActionCancelled') }
+        $promptKey = if ($Required) { 'WaitForRestorePrompt' } else { 'WaitForGamePrompt' }
+        $answer = Read-Host (Get-Text $promptKey)
+        if (-not $Required -and $answer.Trim() -match '^(x|cancelar|cancel|annuler)$') { throw (Get-Text 'ActionCancelled') }
     }
 }
 
@@ -536,28 +544,25 @@ function Show-CaptureSteps {
 function Invoke-ReviewedRestore {
     param($State)
     if (-not $State -or -not $State.BasePackageHash) { throw (Get-Text 'NoPreparedOriginal') }
-    Write-Host (Get-Text 'RestorePreview' @($State.OriginalBackupPath))
-    Wait-ForGameClosed | Out-Null
+    Wait-ForGameClosed -Required | Out-Null
     Invoke-PrivilegedAction -PrivilegedAction 'restore'
     $game = Get-GameInfo
     $restoredHash = (Get-FileHash -LiteralPath $game.Package -Algorithm SHA256).Hash
     if ($restoredHash -ne $State.BasePackageHash) { throw (Get-Text 'RestoreHashMismatch') }
-    Write-Host (Get-Text 'RestoredVerified') -ForegroundColor Green
+    if (-not (Get-AdminStatus)) { Write-Host (Get-Text 'RestoredVerified') -ForegroundColor Green }
 }
 
 function Invoke-CaptureAndRestore {
-    Show-CaptureSteps
-    if (Read-YesNo (Get-Text 'OpenWindowResizerPrompt')) {
-        Invoke-LaunchWindowResizer -Confirmed
+    try {
+        Show-CaptureSteps
+        if (Read-YesNo (Get-Text 'OpenWindowResizerPrompt')) {
+            Invoke-LaunchWindowResizer -Confirmed
+        }
+        Write-Host ''
+        [void](Read-Host (Get-Text 'RestorePrompt'))
+    } finally {
+        Invoke-ReviewedRestore -State (Read-State)
     }
-    Write-Host ''
-    Write-Host (Get-Text 'CloseGameAfterPhoto')
-    $answer = Read-Host (Get-Text 'RestorePrompt')
-    if ($answer.Trim().ToUpperInvariant() -notin @('RESTAURAR', 'RESTORE', 'RESTAURER')) {
-        Write-Host (Get-Text 'PackageRemainsInstalled') -ForegroundColor Yellow
-        return
-    }
-    Invoke-ReviewedRestore -State (Read-State)
 }
 
 function Invoke-Wizard {
@@ -571,23 +576,16 @@ function Invoke-Wizard {
         if ($installedHash -and $installedHash -eq $state.LastAppliedHash) {
             if ($state.ImageType -in @('card', 'portrait')) { $script:ImageType = $state.ImageType }
             Write-UiSection -Title (Get-Text 'CustomPackageDetected')
-            Write-UiField -Label (Get-Text 'FieldPackage') -Value $game.Package
-            Write-UiField -Label 'SHA-256' -Value $installedHash
-            Write-Host ''
             Write-Host (Get-Text 'InstalledPackageMenu')
-            $resume = (Read-Host (Get-Text 'Choose123')).Trim()
-            if ($resume -eq '1') { Invoke-CaptureAndRestore; return }
-            if ($resume -eq '2') {
-                if (Read-YesNo (Get-Text 'ConfirmRestoreOriginal')) { Invoke-ReviewedRestore -State $state }
-                return
+            while ($true) {
+                $resume = (Read-Host (Get-Text 'Choose12')).Trim()
+                if ($resume -eq '1') { Invoke-CaptureAndRestore; return }
+                if ($resume -eq '2') { Invoke-ReviewedRestore -State $state; return }
             }
-            Write-Host (Get-Text 'NoChangesMade')
-            return
         }
     }
 
-    Write-UiSection -Title (Get-Text 'InitialCheck')
-    Invoke-Status
+    Get-GameInfo | Out-Null
 
     Write-UiSection -Title (Get-Text 'StageSelectImage')
     Write-Host (Get-Text 'ChooseImageUse') -ForegroundColor Gray
@@ -617,38 +615,27 @@ function Invoke-Wizard {
     $expected = Get-ExpectedDimensions -Type $ImageType
     $actual = '{0}x{1}' -f $image.Width, $image.Height
     if ($actual -ne $expected) { throw (Get-Text 'WizardWrongDimensions' @($actual, $ImageType, $expected)) }
-    $packageHash = (Get-FileHash -LiteralPath $game.Package -Algorithm SHA256).Hash
-
     Write-UiSection -Title (Get-Text 'StageReviewBeforePrepare')
     $imageTypeLabel = if ($ImageType -eq 'card') { Get-Text 'ImageTypeCard' } else { Get-Text 'ImageTypePortrait' }
     Write-UiField -Label (Get-Text 'FieldImageType') -Value "$imageTypeLabel ($expected)"
     Write-UiField -Label (Get-Text 'FieldImage') -Value $image.Path
-    Write-UiField -Label (Get-Text 'FieldAppIdBuild') -Value "$($game.SteamAppId) / $($game.BuildId)"
-    Write-UiField -Label (Get-Text 'FieldTargetPackage') -Value $game.Package
-    Write-UiField -Label (Get-Text 'FieldCurrentHash') -Value $packageHash
-    $runningLabel = if ($game.IsRunning) { Get-Text 'GameRunningYesShort' @($game.ProcessIds -join ', ') } else { Get-Text 'GameRunningNoShort' }
-    $runningColor = if ($game.IsRunning) { 'Yellow' } else { 'Green' }
-    Write-Host (Get-Text 'GameRunningField' @($runningLabel)) -ForegroundColor $runningColor
+    Write-UiField -Label (Get-Text 'FieldGameFolder') -Value $game.GameRoot
     if (-not (Read-YesNo (Get-Text 'ConfirmPrepare'))) {
         Write-Host (Get-Text 'PrepareCancelled')
         return
     }
 
-    Invoke-Prepare
     Write-UiSection -Title (Get-Text 'StagePrepareComplete')
+    Invoke-Prepare
 
     $modifiedPath = Join-Path $WorkRoot 'm92_mod.pkg'
     $useExisting = $false
     if (Test-Path -LiteralPath $modifiedPath -PathType Leaf) {
         $existing = Get-Item -LiteralPath $modifiedPath
-        $existingHash = (Get-FileHash -LiteralPath $modifiedPath -Algorithm SHA256).Hash
         Write-UiSection -Title (Get-Text 'PreviousPkgResult')
         Write-UiField -Label (Get-Text 'FieldFile') -Value $modifiedPath
         Write-UiField -Label (Get-Text 'FieldModified') -Value $existing.LastWriteTime
         Write-UiField -Label (Get-Text 'FieldSize') -Value ('{0:N1} MiB' -f ($existing.Length / 1MB))
-        Write-UiField -Label 'SHA-256' -Value $existingHash
-        $preparedState = Read-State
-        Write-UiField -Label (Get-Text 'FieldPreparedBaseHash') -Value $preparedState.BasePackageHash
         $useExisting = Read-YesNo (Get-Text 'UsePreviousResultPrompt')
         if (-not $useExisting) {
             $archive = Join-Path $WorkRoot ('m92_mod-previous-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.pkg')
@@ -677,8 +664,6 @@ function Invoke-Wizard {
     Write-UiSection -Title (Get-Text 'StageReviewBeforeInstall')
     Write-UiField -Label (Get-Text 'FieldResult') -Value $modifiedPath
     Write-UiField -Label (Get-Text 'FieldSize') -Value ('{0:N1} MiB' -f ($modifiedBytes / 1MB))
-    Write-UiField -Label 'SHA-256' -Value $modifiedHash
-    Write-UiField -Label (Get-Text 'FieldDestination') -Value $game.Package
     Write-Host (Get-Text 'GameMustBeClosed') -ForegroundColor Gray
     if (-not (Read-YesNo (Get-Text 'InstallResultPrompt'))) {
         Write-Host (Get-Text 'InstallCancelled')
@@ -689,7 +674,7 @@ function Invoke-Wizard {
     $installedGame = Get-GameInfo
     $installedHash = (Get-FileHash -LiteralPath $installedGame.Package -Algorithm SHA256).Hash
     if ($installedHash -ne $modifiedHash) { throw (Get-Text 'InstallReviewMismatch') }
-    Write-Host (Get-Text 'InstallHashVerified') -ForegroundColor Green
+    if (-not (Get-AdminStatus)) { Write-Host (Get-Text 'InstallHashVerified') -ForegroundColor Green }
     Invoke-CaptureAndRestore
 }
 

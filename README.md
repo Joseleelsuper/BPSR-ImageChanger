@@ -22,4 +22,4 @@ powerShell -NoProfile -ExecutionPolicy Bypass -File ".\BPSR-ImageChanger.ps1"
 5. Sigue las instrucciones hasta que el script haya terminado de ejecutarse.
 
 > [!Important]
-> Al terminar de importar y guardar la imagen, recuerda poner RESTORE en la terminal para restaurar el fichero original.
+> Guarda y confirma la foto en BPSR, cierra el juego y pulsa Enter en el asistente. La restauración del fichero original es obligatoria: espera a que el asistente confirme que ha terminado.
