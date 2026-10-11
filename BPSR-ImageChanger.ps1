@@ -606,6 +606,48 @@ function Wait-ForGameClosed {
     }
 }
 
+function Resolve-ModifiedResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)][datetime]$StartedAt
+    )
+    if (Test-Path -LiteralPath $ExpectedPath -PathType Leaf) { return $ExpectedPath }
+
+    $inputPackage = Join-Path $WorkRoot 'm92.pkg'
+    $recentPackages = @()
+    $recentPackages += @(Get-ChildItem -LiteralPath $WorkRoot -Filter 'm92_mod*.pkg' -File -Recurse -ErrorAction SilentlyContinue)
+    $recentPackages += @(Get-ChildItem -LiteralPath $ProjectRoot -Filter 'm92_mod*.pkg' -File -ErrorAction SilentlyContinue)
+    $candidates = @($recentPackages | Where-Object {
+        $_.FullName -ne $inputPackage -and
+        $_.Length -ge 1048576 -and
+        $_.LastWriteTimeUtc -ge $StartedAt
+    } | Sort-Object FullName -Unique)
+
+    if ($candidates.Count -eq 1) {
+        Copy-Item -LiteralPath $candidates[0].FullName -Destination $ExpectedPath -ErrorAction Stop
+        return $ExpectedPath
+    }
+    if ($candidates.Count -gt 1) {
+        foreach ($candidate in $candidates) { Write-Host ('  ' + $candidate.FullName) }
+    }
+
+    $inputPath = ([string](Read-Host (Get-Text 'ModifiedPackagePathPrompt'))).Trim().Trim('"')
+    if (-not $inputPath) { throw (Get-Text 'ModifiedResultMissing' @($ExpectedPath)) }
+    if (-not [IO.Path]::IsPathRooted($inputPath)) {
+        $workPath = Join-Path $WorkRoot $inputPath
+        $inputPath = if (Test-Path -LiteralPath $workPath -PathType Leaf) { $workPath } else { Join-Path $ProjectRoot $inputPath }
+    }
+    $resolvedPath = Resolve-Path -LiteralPath $inputPath -ErrorAction SilentlyContinue
+    if (-not $resolvedPath -or -not (Test-Path -LiteralPath $resolvedPath.Path -PathType Leaf)) {
+        throw (Get-Text 'ModifiedResultMissing' @($inputPath))
+    }
+    if ([IO.Path]::GetExtension($resolvedPath.Path) -ne '.pkg') { throw (Get-Text 'ModifiedResultMissing' @($inputPath)) }
+    if (-not [string]::Equals($resolvedPath.Path, $ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $resolvedPath.Path -Destination $ExpectedPath -ErrorAction Stop
+    }
+    return $ExpectedPath
+}
+
 function Invoke-PrivilegedAction {
     param([ValidateSet('install', 'restore')][string]$PrivilegedAction)
     if (Get-AdminStatus) {
@@ -730,6 +772,7 @@ function Invoke-Wizard {
     }
 
     if (-not $useExisting) {
+        $pkgControlStartedAt = (Get-Date).ToUniversalTime()
         Write-Host (Get-Text 'PkgUnsignedNotice') -ForegroundColor Yellow
         if (Read-YesNo (Get-Text 'OpenPkgControlPrompt')) {
             Invoke-LaunchPkgControl -Confirmed
@@ -738,7 +781,7 @@ function Invoke-Wizard {
         }
         Write-Host (Get-Text 'FollowPkgSteps' @((Join-Path $WorkRoot 'PKGcontrol-pasos.txt')))
         [void](Read-Host (Get-Text 'PkgFinishedPrompt'))
-        if (-not (Test-Path -LiteralPath $modifiedPath -PathType Leaf)) { throw (Get-Text 'ModifiedResultMissing' @($modifiedPath)) }
+        $modifiedPath = Resolve-ModifiedResult -ExpectedPath $modifiedPath -StartedAt $pkgControlStartedAt
     }
 
     $modifiedHash = (Get-FileHash -LiteralPath $modifiedPath -Algorithm SHA256).Hash
