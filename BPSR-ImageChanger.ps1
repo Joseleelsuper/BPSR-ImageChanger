@@ -126,27 +126,6 @@ function Get-SteamLibraries {
     @($libraries | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
 }
 
-function Get-OfficialGameRoots {
-    $roots = @(
-        'C:\BPSR\StarLauncher\game'
-        (Join-Path $env:ProgramFiles 'BPSR\StarLauncher\game')
-        (Join-Path $env:LOCALAPPDATA 'Programs\Blue Protocol Star Resonance')
-        (Join-Path $env:LOCALAPPDATA 'Programs\StarLauncher')
-        (Join-Path $env:LOCALAPPDATA 'Programs\StarLauncher\game')
-    )
-    $uninstallKeys = @(
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    )
-    foreach ($entry in @(Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue | Where-Object {
-        $_.DisplayName -match 'Blue Protocol Star Resonance|StarLauncher'
-    })) {
-        if ($entry.InstallLocation) { $roots += [string]$entry.InstallLocation }
-    }
-    @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique)
-}
-
 function Get-GameInfoFromRoot {
     param(
         [Parameter(Mandatory = $true)][string]$GameRoot,
@@ -155,29 +134,24 @@ function Get-GameInfoFromRoot {
         [bool]$IsRunning,
         [int[]]$ProcessIds = @()
     )
-    foreach ($layout in @(
-        [pscustomobject]@{ Distribution = 'Steam'; DataDirectory = 'BPSR_STEAM_Data' }
-        [pscustomobject]@{ Distribution = 'Official'; DataDirectory = 'BPSR_Data' }
-    )) {
-        $container = Join-Path $GameRoot ($layout.DataDirectory + '\StreamingAssets\container')
-        $package = Join-Path $container 'm92.pkg'
-        if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { continue }
-        [pscustomobject]@{
-            GameRoot   = $GameRoot
-            Container  = $container
-            Package    = $package
-            Manifest   = if ($layout.Distribution -eq 'Steam') { $Manifest } else { $null }
-            BuildId    = if ($layout.Distribution -eq 'Steam') { $BuildId } else { $null }
-            IsRunning  = $IsRunning
-            ProcessIds = $ProcessIds
-            Distribution = $layout.Distribution
-            SteamAppId = if ($layout.Distribution -eq 'Steam') { $AppId } else { $null }
-        }
+    $container = Join-Path $GameRoot 'BPSR_STEAM_Data\StreamingAssets\container'
+    $package = Join-Path $container 'm92.pkg'
+    if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { return }
+    [pscustomobject]@{
+        GameRoot   = $GameRoot
+        Container  = $container
+        Package    = $package
+        Manifest   = $Manifest
+        BuildId    = $BuildId
+        IsRunning  = $IsRunning
+        ProcessIds = $ProcessIds
+        Distribution = 'Steam'
+        SteamAppId = $AppId
     }
 }
 
 function Get-GameInfo {
-    $processes = @(Get-Process -Name @('BPSR_STEAM', 'BPSR') -ErrorAction SilentlyContinue)
+    $processes = @(Get-Process -Name 'BPSR_STEAM' -ErrorAction SilentlyContinue)
     if ($processes.Count -gt 1) {
         throw (Get-Text 'GameMultipleInstances')
     }
@@ -188,14 +162,7 @@ function Get-GameInfo {
     if ($GamePath) {
         if (-not (Test-Path -LiteralPath $GamePath -PathType Container)) { throw (Get-Text 'GamePathNotFound' @($GamePath)) }
         $resolvedGamePath = (Resolve-Path -LiteralPath $GamePath -ErrorAction Stop).Path
-        $searchRoots = @($resolvedGamePath, (Join-Path $resolvedGamePath 'game'))
-        foreach ($searchRoot in $searchRoots) {
-            $roots += $searchRoot
-            $roots += @(Get-ChildItem -LiteralPath $searchRoot -Directory -Filter 'release_*' -ErrorAction SilentlyContinue | ForEach-Object {
-                Join-Path $_.FullName 'game_mini'
-            })
-            $roots += @(Get-ChildItem -LiteralPath $searchRoot -Directory -Filter 'game_mini' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-        }
+        $roots += $resolvedGamePath
     } elseif ($isRunning) {
         try {
             if ($processes[0].Path) { $roots += Split-Path -Parent $processes[0].Path }
@@ -218,18 +185,6 @@ function Get-GameInfo {
                 BuildId = if ($buildMatch.Success) { $buildMatch.Groups[1].Value } else { $null }
             }
         }
-        $roots += @(Get-OfficialGameRoots | ForEach-Object {
-            $root = $_
-            if (Test-Path -LiteralPath (Join-Path $root 'BPSR_Data\StreamingAssets\container\m92.pkg')) { $root }
-            $gameDirectory = Join-Path $root 'game'
-            if (Test-Path -LiteralPath $gameDirectory -PathType Container) { $root = $gameDirectory }
-            if (Test-Path -LiteralPath (Join-Path $root 'BPSR_Data\StreamingAssets\container\m92.pkg')) { $root }
-            $latestRelease = Get-ChildItem -LiteralPath $root -Directory -Filter 'release_*' -ErrorAction SilentlyContinue |
-                Sort-Object { try { [version]($_.Name -replace '^release_', '') } catch { [version]'0.0' } } -Descending |
-                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'game_mini\BPSR_Data\StreamingAssets\container\m92.pkg') } |
-                Select-Object -First 1
-            if ($latestRelease) { Join-Path $latestRelease.FullName 'game_mini' }
-        })
     }
 
     $games = @()
