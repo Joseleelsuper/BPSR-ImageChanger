@@ -3,6 +3,7 @@ param(
     [ValidateSet('wizard', 'status', 'prepare', 'launch-pkgcontrol', 'launch-windowresizer', 'install', 'restore', 'guide')]
     [string]$Action = 'wizard',
     [string]$ImagePath = '',
+    [string]$GamePath = '',
     [ValidateSet('card', 'portrait')]
     [string]$ImageType = 'card',
     [string]$ModifiedPackage = '',
@@ -125,58 +126,139 @@ function Get-SteamLibraries {
     @($libraries | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
 }
 
-function Get-GameInfo {
-    $processes = @(Get-Process -Name 'BPSR_STEAM' -ErrorAction SilentlyContinue)
-    $gameRoot = $null
-    $manifestPath = $null
-    $buildId = $null
+function Get-OfficialGameRoots {
+    $roots = @(
+        'C:\BPSR\StarLauncher\game'
+        (Join-Path $env:ProgramFiles 'BPSR\StarLauncher\game')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Blue Protocol Star Resonance')
+        (Join-Path $env:LOCALAPPDATA 'Programs\StarLauncher')
+        (Join-Path $env:LOCALAPPDATA 'Programs\StarLauncher\game')
+    )
+    $uninstallKeys = @(
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($entry in @(Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue | Where-Object {
+        $_.DisplayName -match 'Blue Protocol Star Resonance|StarLauncher'
+    })) {
+        if ($entry.InstallLocation) { $roots += [string]$entry.InstallLocation }
+    }
+    @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique)
+}
 
-    if ($processes.Count -eq 1) {
-        try {
-            if ($processes[0].Path) { $gameRoot = Split-Path -Parent $processes[0].Path }
-        } catch { }
-    } elseif ($processes.Count -gt 1) {
+function Get-GameInfoFromRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$GameRoot,
+        [string]$Manifest,
+        [string]$BuildId,
+        [bool]$IsRunning,
+        [int[]]$ProcessIds = @()
+    )
+    foreach ($layout in @(
+        [pscustomobject]@{ Distribution = 'Steam'; DataDirectory = 'BPSR_STEAM_Data' }
+        [pscustomobject]@{ Distribution = 'Official'; DataDirectory = 'BPSR_Data' }
+    )) {
+        $container = Join-Path $GameRoot ($layout.DataDirectory + '\StreamingAssets\container')
+        $package = Join-Path $container 'm92.pkg'
+        if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { continue }
+        [pscustomobject]@{
+            GameRoot   = $GameRoot
+            Container  = $container
+            Package    = $package
+            Manifest   = if ($layout.Distribution -eq 'Steam') { $Manifest } else { $null }
+            BuildId    = if ($layout.Distribution -eq 'Steam') { $BuildId } else { $null }
+            IsRunning  = $IsRunning
+            ProcessIds = $ProcessIds
+            Distribution = $layout.Distribution
+            SteamAppId = if ($layout.Distribution -eq 'Steam') { $AppId } else { $null }
+        }
+    }
+}
+
+function Get-GameInfo {
+    $processes = @(Get-Process -Name @('BPSR_STEAM', 'BPSR') -ErrorAction SilentlyContinue)
+    if ($processes.Count -gt 1) {
         throw (Get-Text 'GameMultipleInstances')
     }
 
-    $libraries = @(Get-SteamLibraries)
-    foreach ($library in $libraries) {
-        $candidateManifest = Join-Path $library 'steamapps\appmanifest_3681810.acf'
-        if (-not (Test-Path -LiteralPath $candidateManifest)) { continue }
-        $manifest = Get-Content -LiteralPath $candidateManifest -Raw
-        if ($manifest -notmatch '"appid"\s+"3681810"') { continue }
-        if (-not $manifestPath) {
-            $manifestPath = $candidateManifest
-            $buildMatch = [regex]::Match($manifest, '"buildid"\s+"([^"]+)"')
-            if ($buildMatch.Success) { $buildId = $buildMatch.Groups[1].Value }
+    $isRunning = ($processes.Count -gt 0)
+    $processIds = @($processes | ForEach-Object { $_.Id })
+    $roots = @()
+    if ($GamePath) {
+        if (-not (Test-Path -LiteralPath $GamePath -PathType Container)) { throw (Get-Text 'GamePathNotFound' @($GamePath)) }
+        $resolvedGamePath = (Resolve-Path -LiteralPath $GamePath -ErrorAction Stop).Path
+        $searchRoots = @($resolvedGamePath, (Join-Path $resolvedGamePath 'game'))
+        foreach ($searchRoot in $searchRoots) {
+            $roots += $searchRoot
+            $roots += @(Get-ChildItem -LiteralPath $searchRoot -Directory -Filter 'release_*' -ErrorAction SilentlyContinue | ForEach-Object {
+                Join-Path $_.FullName 'game_mini'
+            })
+            $roots += @(Get-ChildItem -LiteralPath $searchRoot -Directory -Filter 'game_mini' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
         }
-        if (-not $gameRoot) {
-            $installMatch = [regex]::Match($manifest, '"installdir"\s+"([^"]+)"')
-            if ($installMatch.Success) {
-                $candidateRoot = Join-Path $library ('steamapps\common\' + $installMatch.Groups[1].Value + '\bpsr')
-                if (Test-Path -LiteralPath (Join-Path $candidateRoot 'BPSR_STEAM.exe')) {
-                    $gameRoot = $candidateRoot
-                }
-            }
-        }
+    } elseif ($isRunning) {
+        try {
+            if ($processes[0].Path) { $roots += Split-Path -Parent $processes[0].Path }
+        } catch { }
     }
 
-    if (-not $gameRoot) {
-        throw (Get-Text 'GameNotFound')
+    $manifestCandidates = @()
+    if (-not $GamePath) {
+        foreach ($library in @(Get-SteamLibraries)) {
+            $candidateManifest = Join-Path $library 'steamapps\appmanifest_3681810.acf'
+            if (-not (Test-Path -LiteralPath $candidateManifest -PathType Leaf)) { continue }
+            $manifest = Get-Content -LiteralPath $candidateManifest -Raw
+            if ($manifest -notmatch '"appid"\s+"3681810"') { continue }
+            $installMatch = [regex]::Match($manifest, '"installdir"\s+"([^"]+)"')
+            if (-not $installMatch.Success) { continue }
+            $buildMatch = [regex]::Match($manifest, '"buildid"\s+"([^"]+)"')
+            $manifestCandidates += [pscustomobject]@{
+                GameRoot = Join-Path $library ('steamapps\common\' + $installMatch.Groups[1].Value + '\bpsr')
+                Manifest = $candidateManifest
+                BuildId = if ($buildMatch.Success) { $buildMatch.Groups[1].Value } else { $null }
+            }
+        }
+        $roots += @(Get-OfficialGameRoots | ForEach-Object {
+            $root = $_
+            if (Test-Path -LiteralPath (Join-Path $root 'BPSR_Data\StreamingAssets\container\m92.pkg')) { $root }
+            $gameDirectory = Join-Path $root 'game'
+            if (Test-Path -LiteralPath $gameDirectory -PathType Container) { $root = $gameDirectory }
+            if (Test-Path -LiteralPath (Join-Path $root 'BPSR_Data\StreamingAssets\container\m92.pkg')) { $root }
+            $latestRelease = Get-ChildItem -LiteralPath $root -Directory -Filter 'release_*' -ErrorAction SilentlyContinue |
+                Sort-Object { try { [version]($_.Name -replace '^release_', '') } catch { [version]'0.0' } } -Descending |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'game_mini\BPSR_Data\StreamingAssets\container\m92.pkg') } |
+                Select-Object -First 1
+            if ($latestRelease) { Join-Path $latestRelease.FullName 'game_mini' }
+        })
     }
-    $container = Join-Path $gameRoot 'BPSR_STEAM_Data\StreamingAssets\container'
-    $package = Join-Path $container 'm92.pkg'
-    if (-not (Test-Path -LiteralPath $package)) { throw (Get-Text 'PackageNotFound' @($package)) }
-    [pscustomobject]@{
-        GameRoot   = $gameRoot
-        Container  = $container
-        Package    = $package
-        Manifest   = $manifestPath
-        BuildId    = $buildId
-        IsRunning  = ($processes.Count -gt 0)
-        ProcessIds = @($processes | ForEach-Object { $_.Id })
-        SteamAppId = $AppId
+
+    $games = @()
+    foreach ($root in @($roots + @($manifestCandidates | ForEach-Object { $_.GameRoot }))) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $manifestInfo = $manifestCandidates | Where-Object { $_.GameRoot -eq $root } | Select-Object -First 1
+        $games += @(Get-GameInfoFromRoot -GameRoot $root -Manifest $manifestInfo.Manifest -BuildId $manifestInfo.BuildId -IsRunning $isRunning -ProcessIds $processIds)
     }
+    $games = @($games | Sort-Object Package -Unique)
+    if ($games.Count -eq 0) { throw (Get-Text 'GameNotFound') }
+
+    if ($isRunning) {
+        try {
+            $runningRoot = Split-Path -Parent $processes[0].Path
+            $runningGame = @($games | Where-Object { $_.GameRoot -eq $runningRoot })
+            if ($runningGame.Count -eq 1) { return $runningGame[0] }
+        } catch { }
+    }
+    if ($games.Count -eq 1) { return $games[0] }
+
+    $state = Read-State
+    if ($state) {
+        $stateGame = @($games | Where-Object { $_.Package -eq $state.PackagePath })
+        if ($stateGame.Count -eq 1) {
+            $currentHash = (Get-FileHash -LiteralPath $stateGame[0].Package -Algorithm SHA256).Hash
+            if ($currentHash -in @($state.BasePackageHash, $state.LastAppliedHash)) { return $stateGame[0] }
+        }
+    }
+    throw (Get-Text 'MultipleGameInstalls')
 }
 
 function Get-PngInfo {
@@ -257,7 +339,8 @@ function Get-OriginalBackup {
     if ($backupHash -ne $currentHash) { throw (Get-Text 'BackupMismatch') }
     [ordered]@{
         createdUtc = (Get-Date).ToUniversalTime().ToString('o')
-        steamAppId = $AppId
+        steamAppId = $Game.SteamAppId
+        distribution = $Game.Distribution
         steamBuildId = $Game.BuildId
         sourcePath = $Game.Package
         backupPath = $backupPath
@@ -352,8 +435,9 @@ function Invoke-Status {
         }
     }
     Write-UiSection -Title (Get-Text 'SectionInstallation')
-    Write-UiField -Label (Get-Text 'FieldAppId') -Value $game.SteamAppId
-    Write-UiField -Label (Get-Text 'FieldBuild') -Value $game.BuildId
+    Write-UiField -Label (Get-Text 'FieldDistribution') -Value (Get-Text ('Distribution' + $game.Distribution))
+    if ($game.SteamAppId) { Write-UiField -Label (Get-Text 'FieldAppId') -Value $game.SteamAppId }
+    if ($game.BuildId) { Write-UiField -Label (Get-Text 'FieldBuild') -Value $game.BuildId }
     Write-UiField -Label (Get-Text 'FieldGameFolder') -Value $game.GameRoot
     Write-UiField -Label (Get-Text 'FieldTargetPackage') -Value $game.Package
     Write-UiField -Label (Get-Text 'FieldCurrentHash') -Value ((Get-FileHash -LiteralPath $game.Package -Algorithm SHA256).Hash)
@@ -531,6 +615,7 @@ function Invoke-PrivilegedAction {
 
     Write-Host (Get-Text 'UacNotice')
     $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Action {1} -LanguageCode {2}' -f $PSCommandPath, $PrivilegedAction, $script:SelectedLanguageCode
+    if ($GamePath) { $arguments += ' -GamePath "{0}"' -f $GamePath }
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $ProjectRoot -Verb RunAs -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw (Get-Text 'ElevatedActionFailed' @($PrivilegedAction, $process.ExitCode)) }
 }

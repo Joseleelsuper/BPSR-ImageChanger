@@ -5,7 +5,7 @@ Script de PowerShell que te permite cambiar la imagen de cartelera y perfil en B
 ## Uso
 
 > [!Note]
-> Necesitas tener instalado el juego a través de Steam.
+> Necesitas tener instalado el juego a través de Steam o del launcher oficial StarLauncher.
 
 1. [Descarga](https://github.com/Joseleelsuper/BPSR-ImageChanger/archive/refs/heads/main.zip) el repositorio.
 
@@ -20,6 +20,8 @@ powerShell -NoProfile -ExecutionPolicy Bypass -File ".\BPSR-ImageChanger.ps1"
 ```
 
 5. Sigue las instrucciones hasta que el script haya terminado de ejecutarse.
+
+Si hay varias instalaciones o la ruta es personalizada, elige la carpeta con `-GamePath "<ruta>\game_mini"`.
 
 > [!Important]
 > Guarda y confirma la foto en BPSR, cierra el juego y pulsa Enter en el asistente. La restauración del fichero original es obligatoria: espera a que el asistente confirme que ha terminado.
