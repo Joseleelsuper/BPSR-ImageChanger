@@ -7,7 +7,7 @@ Script de PowerShell que te permite cambiar la imagen de cartelera y perfil en B
 > [!Note]
 > Necesitas tener instalado el juego a través de Steam.
 
-1. [Descarga](https://github.com/Joseleelsuper/BPSR-ImageChanger/archive/refs/heads/main.zip) el repositorio.
+1. [Descarga](https://github.com/Joseleelsuper/BPSR-ImageChanger/releases/latest) el repositorio.
 
 2. Accede a los ficheros [PKGcontrolV6RC32Lite.url](https://drive.google.com/file/d/1_bkOGwe-GLrgcwDAHBCt8A1Nw_HX5qPy/view?usp=sharing) y [WindowsResizer](https://github.com/imkuang/WindowResizer/releases/latest) y descargalos. Ponlos en la misma carpeta.
 
